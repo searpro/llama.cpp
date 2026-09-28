@@ -1,0 +1,124 @@
+name: Release build (Linux CUDA)
+
+# Manually-triggered Linux CUDA build of llama-server, published as a GitHub
+# Release in this repo for Pepper's backend installer (LLAMACPP_RELEASE_REPO).
+# Upstream's Linux builds moved to Ubuntu 24.04 (glibc 2.38) and no longer
+# start on 22.04 hosts such as Kaggle, so this fills that gap.
+#
+#   ubuntu-22.04   a binary needs the glibc/libstdc++ of the system it was
+#                  built on or newer; 22.04's glibc 2.35 runs on 22.04 hosts
+#                  (Kaggle) and 24.04 ones (RunPod) alike.
+#   multi-arch     SASS for sm_60 (P100) through sm_89 (RTX 40), plus PTX for
+#                  compute_90 so Hopper/Blackwell JIT-compile on first load.
+#   GGML_NATIVE=OFF  no host-specific CPU instructions, which would SIGILL on
+#                  a different CPU than the runner's.
+#   static         llama/ggml are linked in (BUILD_SHARED_LIBS=OFF,
+#                  GGML_BACKEND_DL=OFF), so the archive is one executable plus
+#                  the CUDA runtime it links.
+#
+# The CUDA runtime libraries are bundled next to llama-server with
+# RPATH=$ORIGIN, so a host needs only an NVIDIA driver (CUDA minor-version
+# compatibility: any R525+ driver runs a 12.x runtime), not the toolkit.
+#
+# Upstream's own workflows are disabled in this fork; this is the only one.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: "Repository to build (owner/name); upstream by default, so no fork sync is needed"
+        required: true
+        default: ggml-org/llama.cpp
+      ref:
+        description: "Release tag (e.g. b11224) or full commit SHA of that repository to build"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-cuda:
+    runs-on: ubuntu-22.04
+    # Seven CUDA targets on a 4-core runner take hours; stay under the 6 h cap.
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build patchelf wget zip
+
+      - name: Install CUDA Toolkit
+        run: |
+          set -euo pipefail
+          CUDA_KEYRING_DEB=cuda-keyring_1.1-1_all.deb
+          wget -q "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/${CUDA_KEYRING_DEB}"
+          sudo dpkg -i "${CUDA_KEYRING_DEB}"
+          rm -f "${CUDA_KEYRING_DEB}"
+          sudo apt-get update
+          # Compiler, runtime, cuBLAS and the driver stub only -- the full
+          # toolkit does not fit comfortably on the runner's disk.
+          sudo apt-get install -y cuda-nvcc-12-9 cuda-cudart-dev-12-9 libcublas-dev-12-9 cuda-driver-dev-12-9
+          echo "/usr/local/cuda-12.9/bin" >> "$GITHUB_PATH"
+          {
+            echo "CUDACXX=/usr/local/cuda-12.9/bin/nvcc"
+            echo "LD_LIBRARY_PATH=/usr/local/cuda-12.9/lib64"
+          } >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_CUDA=ON -DGGML_BACKEND_DL=OFF -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF \
+            -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DCMAKE_CUDA_ARCHITECTURES='60-real;70-real;75-real;80-real;86-real;89-real;90-virtual' \
+            -DCUDA_cuda_driver_LIBRARY=/usr/local/cuda-12.9/lib64/stubs/libcuda.so
+          cmake --build build --config Release --target llama-server -j "$(nproc)"
+
+      - name: Package
+        id: package
+        run: |
+          set -euo pipefail
+          REF='${{ inputs.ref }}'
+          # A tag names itself; a SHA is shortened.
+          if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then REF=$(git rev-parse --short=7 HEAD); fi
+          DIR=llama-server-${REF}-linux-x86_64-cuda-12.9
+          mkdir -p "$DIR"
+          cp build/bin/llama-server "$DIR"/
+          strip "$DIR"/llama-server
+
+          # Bundle the CUDA runtime libraries and point llama-server's RPATH at
+          # them, so the host needs only a driver. libcuda itself is the
+          # driver's and must come from the host, never from here.
+          for lib in $(ldd "$DIR"/llama-server | awk '/libcudart|libcublas/ {print $3}'); do
+            cp -n "$lib" "$DIR"/
+          done
+          patchelf --set-rpath '$ORIGIN' "$DIR"/llama-server
+
+          cp LICENSE "$DIR"/
+          {
+            echo "Built from ${{ inputs.repository }}@$(git rev-parse HEAD) on ubuntu-22.04 (glibc $(ldd --version | head -1 | awk '{print $NF}'))"
+            echo "CUDA 12.9, -DGGML_CUDA=ON -DGGML_BACKEND_DL=OFF -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=OFF"
+            echo "Architectures: sm_60 sm_70 sm_75 sm_80 sm_86 sm_89 (SASS), compute_90 (PTX)"
+            echo "Bundled CUDA runtime libraries:"
+            ls "$DIR"/*.so* | xargs -n1 basename | sed 's/^/  /'
+          } > "$DIR"/BUILD_INFO.txt
+
+          # Smoke test: every library resolves (libcuda is absent on a runner
+          # with no GPU, so it is the one allowed miss).
+          if ldd "$DIR"/llama-server | grep 'not found' | grep -v libcuda.so; then exit 1; fi
+
+          zip -r "$DIR.zip" "$DIR"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "asset=$DIR.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.package.outputs.ref }}-cuda-linux-x64
+          name: CUDA build (${{ steps.package.outputs.ref }}, linux-x64, ubuntu-22.04)
+          files: ${{ steps.package.outputs.asset }}
+          body_path: ${{ steps.package.outputs.dir }}/BUILD_INFO.txt
