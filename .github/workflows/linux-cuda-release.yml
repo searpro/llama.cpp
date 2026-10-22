@@ -8,8 +8,11 @@ name: Release build (Linux CUDA)
 #   ubuntu-22.04   a binary needs the glibc/libstdc++ of the system it was
 #                  built on or newer; 22.04's glibc 2.35 runs on 22.04 hosts
 #                  (Kaggle) and 24.04 ones (RunPod) alike.
-#   multi-arch     SASS for sm_60 (P100) through sm_89 (RTX 40), plus PTX for
-#                  compute_90 so Hopper/Blackwell JIT-compile on first load.
+#   multi-arch     SASS for sm_60 (P100) through sm_89 (RTX 40) and sm_120a
+#                  (RTX 50 / RTX PRO Blackwell), plus PTX for compute_90 so
+#                  Hopper and anything newer JIT-compile on first load. Without
+#                  sm_120a an RTX 5060 Ti spent ~60 s JIT-compiling on the
+#                  first request after every container start.
 #   GGML_NATIVE=OFF  no host-specific CPU instructions, which would SIGILL on
 #                  a different CPU than the runner's.
 #   static         llama/ggml are linked in (BUILD_SHARED_LIBS=OFF,
@@ -39,7 +42,7 @@ permissions:
 jobs:
   build-linux-cuda:
     runs-on: ubuntu-22.04
-    # Seven CUDA targets on a 4-core runner take hours; stay under the 6 h cap.
+    # Eight CUDA targets on a 4-core runner take hours; stay under the 6 h cap.
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
@@ -73,7 +76,7 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DGGML_CUDA=ON -DGGML_BACKEND_DL=OFF -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF \
             -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
-            -DCMAKE_CUDA_ARCHITECTURES='60-real;70-real;75-real;80-real;86-real;89-real;90-virtual' \
+            -DCMAKE_CUDA_ARCHITECTURES='60-real;70-real;75-real;80-real;86-real;89-real;120a-real;90-virtual' \
             -DCUDA_cuda_driver_LIBRARY=/usr/local/cuda-12.9/lib64/stubs/libcuda.so
           cmake --build build --config Release --target llama-server -j "$(nproc)"
 
@@ -101,7 +104,7 @@ jobs:
           {
             echo "Built from ${{ inputs.repository }}@$(git rev-parse HEAD) on ubuntu-22.04 (glibc $(ldd --version | head -1 | awk '{print $NF}'))"
             echo "CUDA 12.9, -DGGML_CUDA=ON -DGGML_BACKEND_DL=OFF -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=OFF"
-            echo "Architectures: sm_60 sm_70 sm_75 sm_80 sm_86 sm_89 (SASS), compute_90 (PTX)"
+            echo "Architectures: sm_60 sm_70 sm_75 sm_80 sm_86 sm_89 sm_120a (SASS), compute_90 (PTX)"
             echo "Bundled CUDA runtime libraries:"
             ls "$DIR"/*.so* | xargs -n1 basename | sed 's/^/  /'
           } > "$DIR"/BUILD_INFO.txt
