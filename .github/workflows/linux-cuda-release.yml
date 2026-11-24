@@ -63,7 +63,7 @@ jobs:
           sudo apt-get update
           # Compiler, runtime, cuBLAS and the driver stub only -- the full
           # toolkit does not fit comfortably on the runner's disk.
-          sudo apt-get install -y cuda-nvcc-12-9 cuda-cudart-dev-12-9 libcublas-dev-12-9 cuda-driver-dev-12-9
+          sudo apt-get install -y cuda-nvcc-12-9 cuda-cudart-dev-12-9 libcublas-dev-12-9 cuda-driver-dev-12-9 cuda-nvml-dev-12-9
           echo "/usr/local/cuda-12.9/bin" >> "$GITHUB_PATH"
           {
             echo "CUDACXX=/usr/local/cuda-12.9/bin/nvcc"
